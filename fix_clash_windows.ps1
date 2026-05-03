@@ -64,7 +64,7 @@ if (-not $clashDir) {
     pause; exit 1
 }
 
-$totalSteps = if ($DiagnoseOnly) { 8 } else { 13 }
+$totalSteps = if ($DiagnoseOnly) { 8 } else { 14 }
 $step = 0
 
 Write-Host ""
@@ -725,6 +725,81 @@ if (-not $SkipRestart) {
     }
 }
 
+# ---- Step 14: DNS API PATCH (fix DPI-blocked subscription DNS) ----
+$step++; Write-Step $step $totalSteps "Patch Clash DNS config via API (UDP DNS + DoH fallback)"
+
+$apiBase = "http://127.0.0.1:9097"
+$apiHeaders = @{ "Authorization" = "Bearer set-your-secret"; "Content-Type" = "application/json" }
+
+# 14a. Wait for Clash API to become available (max 60s)
+$apiWaited = 0
+$apiMaxWait = 60
+$apiReady = $false
+Write-Info "Waiting for Clash API at $apiBase ..."
+while ($apiWaited -lt $apiMaxWait) {
+    try {
+        $null = Invoke-RestMethod -Uri "$apiBase/configs" -Headers $apiHeaders -TimeoutSec 3
+        Write-Ok "Clash API ready after ${apiWaited}s"
+        $apiReady = $true
+        break
+    } catch {
+        Start-Sleep -Seconds 2
+        $apiWaited += 2
+    }
+}
+if (-not $apiReady) {
+    Write-Bad "Clash API not available after ${apiMaxWait}s - DNS patch skipped"
+} else {
+    # 14b. PATCH DNS config: UDP DNS as primary, DoH as fallback only
+    $dnsPatchPayload = @{
+        dns = @{
+            nameserver = @(
+                "119.29.29.29",
+                "223.5.5.5"
+            )
+            fallback = @(
+                "https://doh.pub/dns-query",
+                "https://dns.alidns.com/dns-query"
+            )
+            'proxy-server-nameserver' = @(
+                "119.29.29.29",
+                "223.5.5.5"
+            )
+        }
+    } | ConvertTo-Json -Depth 5
+
+    try {
+        Invoke-RestMethod -Uri "$apiBase/configs" -Method PATCH -Headers $apiHeaders -Body $dnsPatchPayload -TimeoutSec 10
+        Write-Ok "DNS config patched: nameserver=UDP(119.29.29.29,223.5.5.5), fallback=DoH(doh.pub,alidns)"
+    } catch {
+        Write-Bad "DNS patch failed: $($_.Exception.Message)"
+    }
+
+    Start-Sleep -Seconds 3
+
+    # 14c. Verify DNS config
+    try {
+        $cfgVerify = Invoke-RestMethod -Uri "$apiBase/configs" -Headers $apiHeaders -TimeoutSec 5
+        $nsVerify = ($cfgVerify.dns.nameserver | ConvertTo-Json -Compress)
+        if ($nsVerify -match '119\.29\.29\.29') {
+            Write-Ok "Verified: DNS nameserver correctly set to UDP DNS"
+        } else {
+            Write-Warn "DNS nameserver may not be correctly patched: $nsVerify"
+        }
+    } catch {
+        Write-Warn "Could not verify DNS config"
+    }
+
+    # 14d. Quick connectivity test via proxy
+    Start-Sleep -Seconds 2
+    try {
+        $connTest = Invoke-WebRequest -Uri "http://www.gstatic.com/generate_204" -Proxy "http://127.0.0.1:7897" -TimeoutSec 15 -UseBasicParsing
+        Write-Ok "Connectivity test via proxy: OK (status $($connTest.StatusCode))"
+    } catch {
+        Write-Warn "Connectivity test via proxy failed: $($_.Exception.Message)"
+    }
+}
+
 # ══════════════════════════════════════════════════════════
 #  DONE
 # ══════════════════════════════════════════════════════════
@@ -745,6 +820,7 @@ Write-Host "  [WiFi]          Band preference -> 5GHz, Roaming -> Lowest" -Foreg
 Write-Host "  [WiFi]          Power saving -> disabled (all power plans)" -ForegroundColor White
 Write-Host "  [System]        Proxy cleared, DNS flushed, time synced" -ForegroundColor White
 Write-Host "  [Guard]         Persistent daemon: auto-fix TUN+DNS on WiFi switch/reconnect" -ForegroundColor White
+Write-Host "  [DNS API]       UDP DNS patched via API (bypass DPI-blocked DoH)" -ForegroundColor White
 Write-Host ""
 Write-Host "WHY this won't reset on reboot:" -ForegroundColor Yellow
 Write-Host "  Previous fix edited config.yaml which Clash REGENERATES on startup." -ForegroundColor White

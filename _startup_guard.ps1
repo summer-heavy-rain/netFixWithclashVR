@@ -37,13 +37,69 @@ Write-Log "=== Guard started (config-watch mode) ==="
 # 初始等待，让 Clash 完成启动
 Start-Sleep -Seconds 15
 
-# 启动后自动修复被 DPI 封锁的订阅 DNS 服务器
-Write-Log "[DNS] Running DNS fix..."
-try {
-    & "D:\fixClashNet\_fix_dns.ps1" -Silent
-    Write-Log "[DNS] DNS fix script completed"
-} catch {
-    Write-Log "[DNS] DNS fix script failed: $_"
+# 启动后自动修复被 DPI 封锁的订阅 DNS 服务器（内联逻辑，不依赖外部脚本）
+Write-Log "[DNS] Starting inline DNS fix..."
+$apiBase = "http://127.0.0.1:9097"
+$apiHeaders = @{ "Authorization" = "Bearer set-your-secret"; "Content-Type" = "application/json" }
+
+# 等待 Clash API 可用（最长 60 秒）
+$apiWaited = 0; $apiMaxWait = 60; $apiReady = $false
+while ($apiWaited -lt $apiMaxWait) {
+    try {
+        $null = Invoke-RestMethod -Uri "$apiBase/configs" -Headers $apiHeaders -TimeoutSec 3
+        Write-Log "[DNS] API ready after ${apiWaited}s"
+        $apiReady = $true
+        break
+    } catch {
+        Start-Sleep -Seconds 2
+        $apiWaited += 2
+    }
+}
+
+if (-not $apiReady) {
+    Write-Log "[DNS] ERROR: API not available after ${apiMaxWait}s, skipping DNS patch"
+} else {
+    # PATCH DNS: UDP DNS 为主，DoH 仅作 fallback
+    $dnsPatchPayload = @{
+        dns = @{
+            nameserver = @("119.29.29.29", "223.5.5.5")
+            fallback = @("https://doh.pub/dns-query", "https://dns.alidns.com/dns-query")
+            'proxy-server-nameserver' = @("119.29.29.29", "223.5.5.5")
+        }
+    } | ConvertTo-Json -Depth 5
+
+    try {
+        Invoke-RestMethod -Uri "$apiBase/configs" -Method PATCH -Headers $apiHeaders -Body $dnsPatchPayload -TimeoutSec 10
+        Write-Log "[DNS] DNS config patched: UDP DNS primary, DoH fallback"
+    } catch {
+        Write-Log "[DNS] ERROR: DNS patch failed - $($_.Exception.Message)"
+    }
+
+    Start-Sleep -Seconds 3
+
+    # 验证 DNS 配置
+    try {
+        $cfg = Invoke-RestMethod -Uri "$apiBase/configs" -Headers $apiHeaders -TimeoutSec 5
+        $nsStr = ($cfg.dns.nameserver | ConvertTo-Json -Compress)
+        if ($nsStr -match '119\.29\.29\.29') {
+            Write-Log "[DNS] Verified: nameserver correctly set to UDP DNS"
+        } else {
+            Write-Log "[DNS] WARNING: nameserver may not be patched: $nsStr"
+        }
+    } catch {
+        Write-Log "[DNS] WARNING: Could not verify DNS config"
+    }
+
+    # 快速连通性测试
+    Start-Sleep -Seconds 2
+    try {
+        $r = Invoke-WebRequest -Uri "http://www.gstatic.com/generate_204" -Proxy "http://127.0.0.1:7897" -TimeoutSec 15 -UseBasicParsing
+        Write-Log "[DNS] Connectivity test: OK (status $($r.StatusCode))"
+    } catch {
+        Write-Log "[DNS] WARNING: Connectivity test failed - $($_.Exception.Message)"
+    }
+
+    Write-Log "[DNS] DNS fix completed"
 }
 
 while ($true) {

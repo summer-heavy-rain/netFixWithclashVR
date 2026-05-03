@@ -1,7 +1,4 @@
 logs/
 *.log
 run_output.txt
-_admin_fix.*
-terminals/
-agent-transcripts/
 latest_diag.txt
