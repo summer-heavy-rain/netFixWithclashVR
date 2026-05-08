@@ -1,4 +1,5 @@
 logs/
 *.log
+_tmp_*
 run_output.txt
 latest_diag.txt

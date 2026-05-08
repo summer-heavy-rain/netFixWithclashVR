@@ -59,12 +59,14 @@ while ($apiWaited -lt $apiMaxWait) {
 if (-not $apiReady) {
     Write-Log "[DNS] ERROR: API not available after ${apiMaxWait}s, skipping DNS patch"
 } else {
-    # PATCH DNS: UDP DNS 为主，DoH 仅作 fallback
+    # PATCH DNS + Chrome fingerprint: UDP DNS 为主，DoH 仅作 fallback
     $dnsPatchPayload = @{
+        "global-client-fingerprint" = "chrome"
         dns = @{
             nameserver = @("119.29.29.29", "223.5.5.5")
             fallback = @("https://doh.pub/dns-query", "https://dns.alidns.com/dns-query")
             'proxy-server-nameserver' = @("119.29.29.29", "223.5.5.5")
+            'fake-ip-filter' = @("*.lan", "*.local", "*.localhost", "+.msftconnecttest.com", "+.msftncsi.com", "+.u8m1xiygn.sbs", "+.shcgcbzwq.sbs")
         }
     } | ConvertTo-Json -Depth 5
 
