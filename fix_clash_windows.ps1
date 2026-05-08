@@ -364,60 +364,26 @@ Write-Ok "Clash stopped"
 $step++; Write-Step $step $totalSteps "Write optimized Merge profile (PERSISTENT)"
 if ($mergeUid) {
     $mergeFilePath = Join-Path $vergeDataDir "profiles\$mergeUid.yaml"
-    # ── 从运行时配置提取完整 DNS 段，只替换 proxy-server-nameserver ──
-    $runtimeYaml = Join-Path $vergeDataDir "clash-verge.yaml"
-    $dnsBlock = ""
-    if (Test-Path $runtimeYaml) {
-        $rtLines = Get-Content $runtimeYaml -Encoding UTF8
-        $inDns = $false
-        $dnsLines = @()
-        foreach ($rtLine in $rtLines) {
-            if ($rtLine -match '^dns:') { $inDns = $true; $dnsLines += $rtLine; continue }
-            if ($inDns) {
-                if ($rtLine -match '^\S' -and $rtLine -notmatch '^\s*$' -and $rtLine -notmatch '^#') { break }
-                $dnsLines += $rtLine
-            }
-        }
-        if ($dnsLines.Count -gt 1) {
-            # 替换 proxy-server-nameserver 为公共 DNS
-            $newDns = @()
-            $inPSNS = $false
-            foreach ($dl in $dnsLines) {
-                if ($dl -match '^\s+proxy-server-nameserver:') {
-                    $inPSNS = $true
-                    $newDns += $dl
-                    $newDns += "    - 223.5.5.5"
-                    $newDns += "    - 119.29.29.29"
-                    $newDns += "    - 114.114.114.114"
-                    continue
-                }
-                if ($inPSNS) {
-                    if ($dl -match '^\s+-\s') { continue }  # skip old values
-                    $inPSNS = $false
-                }
-                $newDns += $dl
-            }
-            $dnsBlock = ($newDns -join "`n")
-            Write-Ok "Extracted complete DNS config from runtime ($($dnsLines.Count) lines)"
-        }
-    }
-    # 如果无法提取，使用安全的最小完整 DNS 配置
-    if (-not $dnsBlock) {
-        Write-Warn "Cannot extract DNS from runtime config, using safe defaults"
-        $dnsBlock = @"
+    # 直接使用 UDP DNS 配置（订阅的 DoH 被 DPI 封锁，不从运行时提取）
+    $dnsBlock = @"
 dns:
   ipv6: false
   enable: true
   listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
   use-hosts: false
   default-nameserver:
     - 119.29.29.29
     - 223.5.5.5
-    - 8.8.4.4
-    - 1.0.0.1
   nameserver:
     - 119.29.29.29
     - 223.5.5.5
+  fallback:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
   fake-ip-range: 198.18.0.1/15
   fake-ip-filter:
     - '*.lan'
@@ -428,17 +394,20 @@ dns:
     - '*.test'
     - '*.local'
     - '*.home.arpa'
+    - 'time.*.com'
+    - 'ntp.*.com'
+    - '+.msftconnecttest.com'
+    - '+.msftncsi.com'
   proxy-server-nameserver:
-    - 223.5.5.5
     - 119.29.29.29
-    - 114.114.114.114
+    - 223.5.5.5
 "@
-    }
+    Write-Ok "Using safe UDP DNS config (bypasses DPI-blocked subscription DoH)"
     $mergeContent = @"
 # Merge Profile - 持久化配置层
-# 重要：dns 段会整体替换订阅配置，因此必须写入完整的 DNS 配置
-# 只将 proxy-server-nameserver 替换为公共 DNS（避免机场 DOH 返回不可达的 GeoDNS IP）
-# 其余 DNS 字段完全保留订阅原值
+# 重要：订阅的 DoH DNS 服务器被 DPI 封锁，必须使用 UDP DNS 完全替换
+# nameserver 使用 UDP DNS（119.29.29.29, 223.5.5.5）确保低延迟
+# fallback 使用国内 DoH 作为备用
 
 tun:
   stack: mixed
@@ -541,17 +510,17 @@ if (Test-Path $vergeFile) {
         $vf = $vf -replace 'prefer_sidecar:\s*\w+', 'prefer_sidecar: false'
     }
 
-    # Ensure TUN mode enabled
+    # Enable TUN mode (primary traffic routing)
     $vf = $vf -replace 'enable_tun_mode:\s*\w+', 'enable_tun_mode: true'
 
-    # Ensure system proxy disabled (TUN handles everything)
-    $vf = $vf -replace 'enable_system_proxy:\s*\w+', 'enable_system_proxy: false'
+    # Also enable system proxy as fallback (TUN may fail on some Windows versions)
+    $vf = $vf -replace 'enable_system_proxy:\s*\w+', 'enable_system_proxy: true'
 
     # DNS 由机场订阅自行处理，enable_dns_settings 保持 false
     $vf = $vf -replace 'enable_dns_settings:\s*\w+', 'enable_dns_settings: false'
 
     Set-Content $vergeFile $vf -Encoding UTF8
-    Write-Ok "verge.yaml: auto_launch=true, tun=true, sidecar=false, sysproxy=false, dns_settings=false"
+    Write-Ok "verge.yaml: auto_launch=true, tun=true, sysproxy=true(fallback), sidecar=false, dns_settings=false"
 } else {
     Write-Bad "verge.yaml not found!"
 }
@@ -812,10 +781,10 @@ Write-Host ""
 Write-Host "What was fixed (PERSISTENT):" -ForegroundColor Cyan
 Write-Host "  [Merge Profile] TUN stack=mixed, MTU=9000, tcp-concurrent=true" -ForegroundColor White
 Write-Host "  [Merge Profile] sniffer=on, keep-alive=30s/600s, unified-delay=true" -ForegroundColor White
-Write-Host "  [Merge Profile] Complete DNS config (subscription preserved, proxy-server-nameserver=public)" -ForegroundColor White
+Write-Host "  [Merge Profile] Safe UDP DNS (bypass DPI-blocked subscription DoH)" -ForegroundColor White
 Write-Host "  [Rules Profile] AI routing: Google/Cursor/Claude/OpenAI/Copilot" -ForegroundColor White
 Write-Host "  [verge.yaml]    auto-launch=true, TUN=true, service-mode=true" -ForegroundColor White
-Write-Host "  [verge.yaml]    dns_settings=false (DNS由Merge Profile完整配置处理)" -ForegroundColor White
+Write-Host "  [verge.yaml]    sysproxy=true(fallback), dns_settings=false" -ForegroundColor White
 Write-Host "  [WiFi]          Band preference -> 5GHz, Roaming -> Lowest" -ForegroundColor White
 Write-Host "  [WiFi]          Power saving -> disabled (all power plans)" -ForegroundColor White
 Write-Host "  [System]        Proxy cleared, DNS flushed, time synced" -ForegroundColor White
